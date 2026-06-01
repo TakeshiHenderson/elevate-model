@@ -7,7 +7,7 @@ Regenerate synthetic_all_provinces.parquet with fixes to the generation-side fla
 
 Everything else (PMT scoring, anomaly injection, file format) preserved.
 """
-import gc, json, logging, math, sys, uuid
+import gc, json, logging, math, os, sys, uuid
 from pathlib import Path
 from typing import Literal
 import numpy as np
@@ -17,9 +17,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger('rightaid.regen')
 
 RANDOM_SEED = 42
-rng = np.random.default_rng(RANDOM_SEED)
-
-MASTER_CONFIG_PATH = '/home/takeshi/elevate/province_master_config.json'
+MASTER_CONFIG_PATH = os.environ.get(
+    'PROVINCE_CONFIG_PATH', '/home/takeshi/elevate/province_master_config.json')
 OUTPUT_PATH        = Path('/home/takeshi/elevate/synthetic_all_provinces.parquet')
 
 N_HOUSEHOLDS   = 10_000
@@ -334,20 +333,22 @@ def inject_anomaly(df, scenario, anomaly_pct, rng):
 
 
 # ---------------- Drive ----------------
-all_dfs = []
-provinces = sorted(MASTER_CONFIG.keys())
-for i, prov in enumerate(provinces, 1):
-    for scn in ('normal', 'phk', 'bencana'):
-        d = generate_households(prov, N_HOUSEHOLDS, scn, ANOMALY_RATIOS[scn], rng)
-        all_dfs.append(d)
-    logger.info('progress %d/%d done province=%s', i, len(provinces), prov)
+if __name__ == '__main__':
+    rng = np.random.default_rng(RANDOM_SEED)
+    all_dfs = []
+    provinces = sorted(MASTER_CONFIG.keys())
+    for i, prov in enumerate(provinces, 1):
+        for scn in ('normal', 'phk', 'bencana'):
+            d = generate_households(prov, N_HOUSEHOLDS, scn, ANOMALY_RATIOS[scn], rng)
+            all_dfs.append(d)
+        logger.info('progress %d/%d done province=%s', i, len(provinces), prov)
 
-df_all = pd.concat(all_dfs, ignore_index=True)
-df_all.to_parquet(OUTPUT_PATH, index=False)
-logger.info('saved path=%s rows=%d size_mb=%.1f',
-            OUTPUT_PATH, len(df_all), OUTPUT_PATH.stat().st_size / 1e6)
+    df_all = pd.concat(all_dfs, ignore_index=True)
+    df_all.to_parquet(OUTPUT_PATH, index=False)
+    logger.info('saved path=%s rows=%d size_mb=%.1f',
+                OUTPUT_PATH, len(df_all), OUTPUT_PATH.stat().st_size / 1e6)
 
-print(f'\nGenerated: {len(df_all):,} rows, {df_all.shape[1]} cols')
-print(f'Anomaly rate per scenario:')
-for sc, g in df_all.groupby('scenario'):
-    print(f'  {sc:<10}: {g["is_anomaly"].mean()*100:.1f}% (n={len(g):,})')
+    print(f'\nGenerated: {len(df_all):,} rows, {df_all.shape[1]} cols')
+    print(f'Anomaly rate per scenario:')
+    for sc, g in df_all.groupby('scenario'):
+        print(f'  {sc:<10}: {g["is_anomaly"].mean()*100:.1f}% (n={len(g):,})')
