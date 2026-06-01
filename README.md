@@ -132,3 +132,130 @@ python predict.py
 - **No data leakage**: `pengeluaran_per_kapita` (actual income) and PMT scores excluded from features
 - **Threshold**: optimized for F1 on test set (0.465), stored in the pkl
 - **PMT benchmark**: conventional PMT uses static national weights (Permensos No. 5/2019 approximation) — simulated in `regenerate_data.py`
+
+---
+
+## Backend
+
+The `backend/` directory contains a **FastAPI** REST API that wraps the trained models and exposes them for the RightAid dashboard.
+
+### Directory layout
+
+```
+backend/
+├── main.py              # FastAPI app + all route handlers
+├── auth.py              # JWT authentication helpers
+├── config.py            # Pydantic-settings config (reads .env)
+├── models.py            # Pydantic request/response schemas
+├── session_store.py     # In-memory session store (generated datasets)
+├── requirements.txt     # Python dependencies
+├── Dockerfile           # Production container (built from repo root)
+└── services/
+    ├── data_generator.py  # Synthetic household data generation
+    ├── predictor.py       # Model inference + PMT benchmark comparison
+    ├── shap_service.py    # Per-record SHAP explanation
+    └── policy_brief.py    # Azure OpenAI policy brief generation
+```
+
+### Environment configuration
+
+Copy `.env.example` to `.env` inside `backend/` and fill in the values:
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+| Variable | Description |
+|---|---|
+| `SECRET_KEY` | JWT signing secret — generate with `openssl rand -hex 32` |
+| `RIGHTAID_USERS_JSON` | JSON array of user objects `[{"email":…,"password":…,"name":…,"role":…}]` |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource endpoint |
+| `AZURE_OPENAI_KEY` | Azure OpenAI API key |
+| `AZURE_OPENAI_DEPLOYMENT` | Model deployment name (default: `gpt-4o`) |
+| `PROVINCE_CONFIG_PATH` | Path to `province_master_config.json` (default: `/app/province_master_config.json`) |
+| `MODEL_ELIGIBILITY_PATH` | Path to eligibility model pkl (default: `/app/models/xgboost_eligibility_v3.pkl`) |
+| `MODEL_ANOMALY_PATH` | Path to anomaly model pkl (default: `/app/models/xgboost_anomaly_v2.pkl`) |
+
+### Run locally (development)
+
+The backend must be started from the **repo root** so that it can find the model files and `province_master_config.json`.
+
+```bash
+# 1. Create and activate a virtual environment (if not already done)
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
+# 2. Install backend dependencies
+pip install -r backend/requirements.txt
+
+# 3. Configure environment
+cp backend/.env.example backend/.env
+# Edit backend/.env — set SECRET_KEY, RIGHTAID_USERS_JSON, and Azure OpenAI vars
+
+# 4. Override the default Docker paths for local dev
+export PROVINCE_CONFIG_PATH=$(pwd)/province_master_config.json
+export MODEL_ELIGIBILITY_PATH=$(pwd)/output/xgboost_eligibility_v3.pkl
+export MODEL_ANOMALY_PATH=$(pwd)/output/xgboost_anomaly_v2.pkl
+
+# 5. Start the server
+uvicorn backend.main:app --reload --port 8000
+```
+
+The API will be available at `http://localhost:8000`.  
+Interactive docs (Swagger UI): `http://localhost:8000/docs`
+
+> **Note:** Run Step 3 of the [Reproduce](#reproduce) section first to generate the model pickle files if they don't exist yet.
+
+### Run with Docker
+
+The Dockerfile is designed to be built from the **repo root** so it can copy model files and shared scripts into the image.
+
+```bash
+# Build
+docker build -t rightaid-api .
+
+# Run (pass secrets via environment variables)
+docker run -p 8000:8000 \
+  -e SECRET_KEY="$(openssl rand -hex 32)" \
+  -e RIGHTAID_USERS_JSON='[{"email":"guest@rightaid.id","password":"guest123","name":"Guest Analyst","role":"guest"}]' \
+  -e AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/" \
+  -e AZURE_OPENAI_KEY="your-key" \
+  -e AZURE_OPENAI_DEPLOYMENT="gpt-4o" \
+  rightaid-api
+```
+
+### API endpoints
+
+All endpoints except `/health` and `POST /api/auth/login` require a Bearer JWT token in the `Authorization` header.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Health check |
+| `POST` | `/api/auth/login` | Authenticate — returns JWT token |
+| `POST` | `/api/auth/logout` | Logout (client-side token discard) |
+| `GET` | `/api/stats/national` | National poverty statistics |
+| `GET` | `/api/stats/trend` | Monthly exclusion/inclusion error trend |
+| `GET` | `/api/model/comparison` | PMT vs ML model metrics side-by-side |
+| `GET` | `/api/provinces` | List all 38 provinces with derived stats |
+| `POST` | `/api/generate` | Generate a synthetic household dataset for a province/scenario |
+| `GET` | `/api/data/{session_id}` | Paginated view of a generated dataset (with ML scores if predicted) |
+| `GET` | `/api/data/{session_id}/export` | Export dataset as CSV |
+| `POST` | `/api/predict/{session_id}` | Run ML inference on a generated dataset |
+| `GET` | `/api/shap/{session_id}/{record_id}` | SHAP feature-importance explanation for a single record |
+| `POST` | `/api/policy-brief` | Generate an AI policy brief via Azure OpenAI |
+
+#### Example: login and generate data
+
+```bash
+# 1. Authenticate
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"guest@rightaid.id","password":"guest123"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# 2. Generate 1000 households in DKI Jakarta, normal scenario
+curl -s -X POST http://localhost:8000/api/generate \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"province_id":"DKI Jakarta","scenario":"normal","anomaly_pct":0.05,"n":1000}'
+```
